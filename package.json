@@ -1,16 +1,17 @@
 {
-  "name": "haywhy-football-hub",
-  "version": "1.0.0",
-  "description": "HAYWHY MEDIA Football Live Hub with football scores and YouTube integration",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "engines": {
-    "node": "22.x"
-  },
-  "dependencies": {
-    "express": "^5.1.0",
-    "googleapis": "^144.0.0"
-  }
+"name": "haywhy-football-hub",
+"version": "1.0.0",
+"description": "HAYWHY MEDIA Football Live Hub with football scores and YouTube integration",
+"main": "server.js",
+"scripts": {
+"start": "node server.js"
+},
+"engines": {
+"node": "22.x"
+},
+"dependencies": {
+"express": "^5.1.0",
+"googleapis": "^144.0.0",
+"@supabase/supabase-js": "^2.57.0"
+}
 }
