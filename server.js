@@ -377,6 +377,85 @@ app.get("/auth/google/callback", async (req, res) => {
     );
   }
 });
+// PROTECTED YOUTUBE CONNECTION TEST
+app.get("/api/youtube/test", async (req, res) => {
+  const suppliedKey = req.get("x-admin-key");
+
+  if (
+    !process.env.ADMIN_API_KEY ||
+    !suppliedKey ||
+    suppliedKey !== process.env.ADMIN_API_KEY
+  ) {
+    return res.status(401).json({
+      success: false,
+      error: "Unauthorized."
+    });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from("youtube_tokens")
+      .select("refresh_token, expiry_date")
+      .eq("user_id", "primary-channel")
+      .maybeSingle();
+
+    if (error) throw error;
+
+    if (!data?.refresh_token) {
+      return res.status(409).json({
+        success: false,
+        connected: false,
+        message: "No saved YouTube refresh token. Connect YouTube again."
+      });
+    }
+
+    const auth = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      REDIRECT_URI
+    );
+
+    auth.setCredentials({
+      refresh_token: data.refresh_token,
+      expiry_date: data.expiry_date
+    });
+
+    const youtube = google.youtube({
+      version: "v3",
+      auth
+    });
+
+    const response = await youtube.channels.list({
+      part: ["id", "snippet"],
+      mine: true
+    });
+
+    const channel = response.data.items?.[0];
+
+    if (!channel) {
+      return res.status(404).json({
+        success: false,
+        connected: false,
+        message: "No YouTube channel was returned."
+      });
+    }
+
+    return res.json({
+      success: true,
+      connected: true,
+      channelTitle: channel.snippet?.title || "YouTube channel",
+      message: "YouTube connection test successful."
+    });
+  } catch (error) {
+    console.error("YouTube connection test failed:", error.message);
+
+    return res.status(502).json({
+      success: false,
+      connected: false,
+      message: "YouTube connection test failed. Check Render logs."
+    });
+  }
+});
 
 // HEALTH CHECK
 app.get("/health", (req, res) => {
