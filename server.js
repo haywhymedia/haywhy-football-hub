@@ -1,6 +1,7 @@
 const express = require("express");
 const { google } = require("googleapis");
 const crypto = require("crypto");
+const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -10,13 +11,45 @@ app.use(express.json());
 const REDIRECT_URI =
   "https://haywhy-football-hub.onrender.com/auth/google/callback";
 
+if (
+  !process.env.GOOGLE_CLIENT_ID ||
+  !process.env.GOOGLE_CLIENT_SECRET ||
+  !process.env.SUPABASE_URL ||
+  !process.env.SUPABASE_SERVICE_ROLE_KEY
+) {
+  console.error("Required environment variables are missing.");
+}
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY,
+  {
+    auth: {
+      persistSession: false,
+      autoRefreshToken: false,
+      detectSessionInUrl: false
+    }
+  }
+);
+
 const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_CLIENT_ID,
   process.env.GOOGLE_CLIENT_SECRET,
   REDIRECT_URI
 );
 
+// Temporary OAuth state storage.
 const oauthStates = new Map();
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, character => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#39;"
+  })[character]);
+}
 
 // HOMEPAGE
 app.get("/", (req, res) => {
@@ -26,6 +59,7 @@ app.get("/", (req, res) => {
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1">
+      <meta name="description" content="HAYWHY MEDIA Football Live Hub for football fixtures, match information, and authorized YouTube broadcast management.">
       <title>HAYWHY MEDIA Football Live Hub</title>
       <style>
         * { box-sizing: border-box; }
@@ -60,6 +94,7 @@ app.get("/", (req, res) => {
           border-radius: 8px;
           font-weight: bold;
           text-decoration: none;
+          border: 0;
         }
         .secondary { background: #243c56; color: white; }
         .card {
@@ -98,9 +133,7 @@ app.get("/", (req, res) => {
         </section>
       </main>
 
-      <footer>
-        HAYWHY MEDIA Football Live Hub
-      </footer>
+      <footer>HAYWHY MEDIA Football Live Hub</footer>
 
       <script>
         async function loadMatches() {
@@ -119,7 +152,7 @@ app.get("/", (req, res) => {
               return;
             }
 
-            list.innerHTML = "";
+            list.replaceChildren();
 
             data.matches.forEach(match => {
               const card = document.createElement("div");
@@ -137,17 +170,24 @@ app.get("/", (req, res) => {
               const status = document.createElement("p");
               status.textContent = "Status: " + (match.status || "Unknown");
 
+              const score = document.createElement("p");
+              if (match.homeScore !== null && match.awayScore !== null) {
+                score.textContent =
+                  "Score: " + match.homeScore + " - " + match.awayScore;
+              }
+
               const time = document.createElement("p");
               time.className = "muted";
               time.textContent = match.utcDate
                 ? new Date(match.utcDate).toLocaleString()
                 : "";
 
-              card.append(competition, teams, status, time);
+              card.append(competition, teams, status, score, time);
               list.appendChild(card);
             });
           } catch (error) {
-            list.textContent = "Unable to load matches. Please try again later.";
+            list.textContent =
+              "Unable to load matches. Please try again later.";
           }
         }
 
@@ -185,22 +225,24 @@ app.get("/api/matches", async (req, res) => {
     }
 
     const data = await response.json();
+    const matches = Array.isArray(data.matches) ? data.matches : [];
 
     res.json({
       updatedAt: new Date().toISOString(),
-      count: data.matches.length,
-      matches: data.matches.map(match => ({
-        competition: match.competition?.name,
-        homeTeam: match.homeTeam?.name,
-        awayTeam: match.awayTeam?.name,
-        utcDate: match.utcDate,
-        status: match.status,
-        minute: match.minute,
-        homeScore: match.score?.fullTime?.home,
-        awayScore: match.score?.fullTime?.away
+      count: matches.length,
+      matches: matches.map(match => ({
+        competition: match.competition?.name || "Football",
+        homeTeam: match.homeTeam?.name || "Home team",
+        awayTeam: match.awayTeam?.name || "Away team",
+        utcDate: match.utcDate || null,
+        status: match.status || "UNKNOWN",
+        minute: match.minute ?? null,
+        homeScore: match.score?.fullTime?.home ?? null,
+        awayScore: match.score?.fullTime?.away ?? null
       }))
     });
   } catch (error) {
+    console.error("Football data request failed:", error.message);
     res.status(502).json({
       error: "Unable to retrieve football matches right now."
     });
@@ -214,8 +256,15 @@ app.get("/auth/google", (req, res) => {
     !process.env.GOOGLE_CLIENT_SECRET
   ) {
     return res.status(500).send(
-      "YouTube connection is not configured. Check your Render environment variables."
+      "YouTube connection is not configured. Check Render environment variables."
     );
+  }
+
+  // Remove expired OAuth states.
+  for (const [key, createdAt] of oauthStates.entries()) {
+    if (Date.now() - createdAt > 10 * 60 * 1000) {
+      oauthStates.delete(key);
+    }
   }
 
   const state = crypto.randomBytes(32).toString("hex");
@@ -241,7 +290,8 @@ app.get("/auth/google/callback", async (req, res) => {
     );
   }
 
-  const createdAt = oauthStates.get(state);
+  const createdAt =
+    typeof state === "string" ? oauthStates.get(state) : undefined;
 
   if (
     typeof state !== "string" ||
@@ -255,11 +305,12 @@ app.get("/auth/google/callback", async (req, res) => {
 
   oauthStates.delete(state);
 
+  if (typeof code !== "string" || !code) {
+    return res.status(400).send("Missing Google authorization code.");
+  }
+
   try {
     const { tokens } = await oauth2Client.getToken(code);
-
-    // This starter version does not persist tokens.
-    // Secure token storage must be implemented before production use.
 
     if (!tokens.access_token) {
       return res.status(500).send(
@@ -267,24 +318,62 @@ app.get("/auth/google/callback", async (req, res) => {
       );
     }
 
+    // Look up the existing refresh token so it is not accidentally lost.
+    const { data: existing, error: readError } = await supabase
+      .from("youtube_tokens")
+      .select("refresh_token")
+      .eq("user_id", "primary-channel")
+      .maybeSingle();
+
+    if (readError) {
+      throw readError;
+    }
+
+    const refreshToken =
+      tokens.refresh_token || existing?.refresh_token || null;
+
+    if (!refreshToken) {
+      return res.status(500).send(
+        "Google did not provide a refresh token. Try reconnecting YouTube."
+      );
+    }
+
+    const { error: saveError } = await supabase
+      .from("youtube_tokens")
+      .upsert(
+        {
+          user_id: "primary-channel",
+          access_token: tokens.access_token,
+          refresh_token: refreshToken,
+          expiry_date: tokens.expiry_date || null,
+          updated_at: new Date().toISOString()
+        },
+        { onConflict: "user_id" }
+      );
+
+    if (saveError) {
+      throw saveError;
+    }
+
     res.send(`
       <!DOCTYPE html>
-      <html>
+      <html lang="en">
       <head>
         <meta name="viewport" content="width=device-width, initial-scale=1">
         <title>YouTube Connected</title>
       </head>
       <body style="font-family:Arial;text-align:center;padding:30px">
-        <h1>Google authorization successful!</h1>
-        <p>Your YouTube authorization worked. Secure token storage and
-        broadcast management still need to be implemented.</p>
+        <h1>YouTube Connected Successfully!</h1>
+        <p>Your authorization tokens were saved on the server.</p>
+        <p>Broadcast creation and video streaming still need to be implemented.</p>
         <a href="/">Return to HAYWHY MEDIA Football Hub</a>
       </body>
       </html>
     `);
   } catch (error) {
+    console.error("YouTube token storage failed:", error.message);
     res.status(500).send(
-      "YouTube authorization failed. Check the Google OAuth settings and Render logs."
+      "YouTube authorization could not be saved. Check Render logs for details."
     );
   }
 });
