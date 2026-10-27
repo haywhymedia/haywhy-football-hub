@@ -386,3 +386,161 @@ app.get("/health", (req, res) => {
 app.listen(PORT, () => {
   console.log(`HAYWHY MEDIA Football Hub running on port ${PORT}`);
 });
+
+// CREATE A YOUTUBE LIVE BROADCAST
+app.post("/api/youtube/broadcast", async (req, res) => {
+  const suppliedKey = req.get("x-admin-key");
+
+  if (
+    !process.env.ADMIN_API_KEY ||
+    !suppliedKey ||
+    suppliedKey !== process.env.ADMIN_API_KEY
+  ) {
+    return res.status(401).json({
+      error: "Unauthorized."
+    });
+  }
+
+  const title =
+    typeof req.body.title === "string"
+      ? req.body.title.trim()
+      : "";
+
+  const description =
+    typeof req.body.description === "string"
+      ? req.body.description.trim()
+      : "HAYWHY MEDIA Football Live Hub.";
+
+  const scheduledStartTime =
+    typeof req.body.scheduledStartTime === "string"
+      ? req.body.scheduledStartTime
+      : "";
+
+  if (!title || title.length > 100) {
+    return res.status(400).json({
+      error: "Title must contain 1–100 characters."
+    });
+  }
+
+  const startDate = new Date(scheduledStartTime);
+
+  if (
+    !scheduledStartTime ||
+    Number.isNaN(startDate.getTime()) ||
+    startDate.getTime() <= Date.now()
+  ) {
+    return res.status(400).json({
+      error: "Provide a valid future scheduledStartTime."
+    });
+  }
+
+  try {
+    const { data: savedTokens, error: tokenError } =
+      await supabase
+        .from("youtube_tokens")
+        .select("access_token, refresh_token, expiry_date")
+        .eq("user_id", "primary-channel")
+        .maybeSingle();
+
+    if (tokenError) throw tokenError;
+
+    if (!savedTokens?.refresh_token) {
+      return res.status(409).json({
+        error: "Connect YouTube before creating a broadcast."
+      });
+    }
+
+    const youtubeAuth = new google.auth.OAuth2(
+      process.env.GOOGLE_CLIENT_ID,
+      process.env.GOOGLE_CLIENT_SECRET,
+      REDIRECT_URI
+    );
+
+    youtubeAuth.setCredentials({
+      access_token: savedTokens.access_token,
+      refresh_token: savedTokens.refresh_token,
+      expiry_date: savedTokens.expiry_date
+    });
+
+    const youtube = google.youtube({
+      version: "v3",
+      auth: youtubeAuth
+    });
+
+    // Create the YouTube broadcast.
+    const broadcastResponse =
+      await youtube.liveBroadcasts.insert({
+        part: ["snippet", "status", "contentDetails"],
+        requestBody: {
+          snippet: {
+            title,
+            description,
+            scheduledStartTime: startDate.toISOString()
+          },
+          status: {
+            privacyStatus: "private",
+            selfDeclaredMadeForKids: false
+          },
+          contentDetails: {
+            enableAutoStart: false,
+            enableAutoStop: false,
+            enableDvr: true,
+            recordFromStart: true
+          }
+        }
+      });
+
+    const broadcast = broadcastResponse.data;
+
+    // Create the video stream for the broadcast.
+    const streamResponse = await youtube.liveStreams.insert({
+      part: ["snippet", "cdn", "contentDetails"],
+      requestBody: {
+        snippet: {
+          title: `${title} - HAYWHY MEDIA Stream`
+        },
+        cdn: {
+          frameRate: "30fps",
+          ingestionType: "rtmp",
+          resolution: "720p"
+        },
+        contentDetails: {
+          isReusable: false
+        }
+      }
+    });
+
+    const stream = streamResponse.data;
+
+    // Connect the broadcast to the stream.
+    await youtube.liveBroadcasts.bind({
+      part: ["id", "contentDetails", "snippet", "status"],
+      id: broadcast.id,
+      streamId: stream.id
+    });
+
+    // Never return the stream key to the browser.
+    res.status(201).json({
+      success: true,
+      message:
+        "Private YouTube broadcast created. A video source is still required.",
+      broadcastId: broadcast.id,
+      streamId: stream.id,
+      title: broadcast.snippet?.title,
+      scheduledStartTime:
+        broadcast.snippet?.scheduledStartTime,
+      privacyStatus: "private",
+      youtubeStudioUrl: "https://studio.youtube.com/"
+    });
+  } catch (error) {
+    console.error(
+      "YouTube broadcast creation failed:",
+      error.message
+    );
+
+    res.status(502).json({
+      error:
+        "Could not create the broadcast. Check Render logs and YouTube API permissions."
+    });
+  }
+});
